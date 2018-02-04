@@ -18,8 +18,8 @@ all: all-container
 BUILDTAGS=
 
 # Use the 0.0 tag for testing, it shouldn't clobber any release builds
-TAG?=0.10.2
-REGISTRY?=quay.io/kubernetes-ingress-controller
+TAG?=0.0.1
+REGISTRY?=quay.io/kong-ingress-controller
 GOOS?=linux
 DOCKER?=gcloud docker --
 SED_I?=sed -i
@@ -141,7 +141,7 @@ code-generator:
 build: clean
 	CGO_ENABLED=0 GOOS=${GOOS} GOARCH=${GOARCH} go build -a -installsuffix cgo \
 		-ldflags "-s -w -X ${PKG}/version.RELEASE=${TAG} -X ${PKG}/version.COMMIT=${COMMIT} -X ${PKG}/version.REPO=${REPO_INFO}" \
-		-o ${TEMP_DIR}/rootfs/nginx-ingress-controller ${PKG}/cmd/nginx
+		-o ${TEMP_DIR}/rootfs/kong-ingress-controller ${PKG}/cmd/nginx
 
 .PHONY: verify-all
 verify-all:

@@ -593,27 +593,12 @@ type TemplateConfig struct {
 	MaxOpenFiles            int
 	BacklogSize             int
 	Backends                []*ingress.Backend
-	PassthroughBackends     []*ingress.SSLPassthroughBackend
 	Servers                 []*ingress.Server
-	TCPBackends             []ingress.L4Service
-	UDPBackends             []ingress.L4Service
 	HealthzURI              string
 	CustomErrors            bool
 	Cfg                     Configuration
 	IsIPV6Enabled           bool
 	IsSSLPassthroughEnabled bool
 	RedirectServers         map[string]string
-	ListenPorts             *ListenPorts
 	PublishService          *apiv1.Service
-}
-
-// ListenPorts describe the ports required to run the
-// NGINX Ingress controller
-type ListenPorts struct {
-	HTTP     int
-	HTTPS    int
-	Status   int
-	Health   int
-	Default  int
-	SSLProxy int
 }

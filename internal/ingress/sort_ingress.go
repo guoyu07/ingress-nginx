@@ -42,6 +42,13 @@ type SSLCert struct {
 	CN []string `json:"cn"`
 	// ExpiresTime contains the expiration of this SSL certificate in timestamp format
 	ExpireTime time.Time `json:"expires"`
+
+	Raw RawSSLCert
+}
+
+type RawSSLCert struct {
+	Cert []byte
+	Key  []byte
 }
 
 // GetObjectKind implements the ObjectKind interface as a noop

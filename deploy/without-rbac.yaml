@@ -16,19 +16,9 @@ spec:
         prometheus.io/port: '10254'
         prometheus.io/scrape: 'true' 
     spec:
-      initContainers:
-      - command:
-        - sh
-        - -c
-        - sysctl -w net.core.somaxconn=32768; sysctl -w net.ipv4.ip_local_port_range="1024 65535"
-        image: alpine:3.6
-        imagePullPolicy: IfNotPresent
-        name: sysctl
-        securityContext:
-          privileged: true
       containers:
         - name: nginx-ingress-controller
-          image: quay.io/kubernetes-ingress-controller/nginx-ingress-controller:0.10.2
+          image: quay.io/aledbf/nginx-ingress-controller:0.1-kong
           args:
             - /nginx-ingress-controller
             - --default-backend-service=$(POD_NAMESPACE)/default-http-backend
@@ -36,6 +26,7 @@ spec:
             - --tcp-services-configmap=$(POD_NAMESPACE)/tcp-services
             - --udp-services-configmap=$(POD_NAMESPACE)/udp-services
             - --annotations-prefix=nginx.ingress.kubernetes.io
+            - --kong-url="http://kong-admin.default.svc.cluster.local:8001"
           env:
             - name: POD_NAME
               valueFrom:

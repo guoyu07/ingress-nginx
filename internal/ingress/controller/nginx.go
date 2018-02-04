@@ -18,21 +18,17 @@ package controller
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
-	"io/ioutil"
 	"net"
-	"os"
-	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/ingress-nginx/internal/kong"
 
 	"github.com/golang/glog"
 
-	proxyproto "github.com/armon/go-proxyproto"
 	apiv1 "k8s.io/api/core/v1"
 	extensions "k8s.io/api/extensions/v1beta1"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -45,42 +41,17 @@ import (
 	"k8s.io/ingress-nginx/internal/ingress"
 	"k8s.io/ingress-nginx/internal/ingress/annotations"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/class"
-	ngx_config "k8s.io/ingress-nginx/internal/ingress/controller/config"
-	"k8s.io/ingress-nginx/internal/ingress/controller/process"
 	"k8s.io/ingress-nginx/internal/ingress/controller/store"
-	ngx_template "k8s.io/ingress-nginx/internal/ingress/controller/template"
 	"k8s.io/ingress-nginx/internal/ingress/status"
 	ing_net "k8s.io/ingress-nginx/internal/net"
 	"k8s.io/ingress-nginx/internal/net/dns"
-	"k8s.io/ingress-nginx/internal/net/ssl"
 	"k8s.io/ingress-nginx/internal/task"
-	"k8s.io/ingress-nginx/internal/watch"
-)
-
-type statusModule string
-
-const (
-	ngxHealthPath = "/healthz"
-
-	defaultStatusModule statusModule = "default"
-	vtsStatusModule     statusModule = "vts"
-)
-
-var (
-	tmplPath    = "/etc/nginx/template/nginx.tmpl"
-	cfgPath     = "/etc/nginx/nginx.conf"
-	nginxBinary = "/usr/sbin/nginx"
 )
 
 // NewNGINXController creates a new NGINX Ingress controller.
 // If the environment variable NGINX_BINARY exists it will be used
 // as source for nginx commands
 func NewNGINXController(config *Configuration, fs file.Filesystem) *NGINXController {
-	ngx := os.Getenv("NGINX_BINARY")
-	if ngx == "" {
-		ngx = nginxBinary
-	}
-
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(glog.Infof)
 	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{
@@ -93,8 +64,6 @@ func NewNGINXController(config *Configuration, fs file.Filesystem) *NGINXControl
 	}
 
 	n := &NGINXController{
-		binary: ngx,
-
 		isIPV6Enabled: ing_net.IsIPv6Enabled(),
 
 		resolver:        h,
@@ -114,23 +83,19 @@ func NewNGINXController(config *Configuration, fs file.Filesystem) *NGINXControl
 
 		// create an empty configuration.
 		runningConfig: &ingress.Configuration{},
-
-		Proxy: &TCPProxy{},
 	}
 
 	n.store = store.New(
 		config.EnableSSLChainCompletion,
 		config.Namespace,
 		config.ConfigMapName,
-		config.TCPConfigMapName,
-		config.UDPConfigMapName,
-		config.DefaultSSLCertificate,
+		"",
+		"",
+		"",
 		config.ResyncPeriod,
 		config.Client,
 		fs,
 		n.updateCh)
-
-	n.stats = newStatsCollector(config.Namespace, class.IngressClass, n.binary, n.cfg.ListenPorts.Status)
 
 	n.syncQueue = task.NewTaskQueue(n.syncIngress)
 
@@ -149,41 +114,6 @@ func NewNGINXController(config *Configuration, fs file.Filesystem) *NGINXControl
 		})
 	} else {
 		glog.Warning("Update of ingress status is disabled (flag --update-status=false was specified)")
-	}
-
-	var onChange func()
-	onChange = func() {
-		template, err := ngx_template.NewTemplate(tmplPath, fs)
-		if err != nil {
-			// this error is different from the rest because it must be clear why nginx is not working
-			glog.Errorf(`
--------------------------------------------------------------------------------
-Error loading new template : %v
--------------------------------------------------------------------------------
-`, err)
-			return
-		}
-
-		n.t = template
-		glog.Info("new NGINX template loaded")
-		n.SetForceReload(true)
-	}
-
-	ngxTpl, err := ngx_template.NewTemplate(tmplPath, fs)
-	if err != nil {
-		glog.Fatalf("invalid NGINX template: %v", err)
-	}
-
-	n.t = ngxTpl
-
-	// TODO: refactor
-	if _, ok := fs.(filesystem.DefaultFs); !ok {
-		watch.NewDummyFileWatcher(tmplPath, onChange)
-	} else {
-		_, err = watch.NewFileWatcher(tmplPath, onChange)
-		if err != nil {
-			glog.Fatalf("unexpected error watching template %v: %v", tmplPath, err)
-		}
 	}
 
 	return n
@@ -217,22 +147,12 @@ type NGINXController struct {
 	// runningConfig contains the running configuration in the Backend
 	runningConfig *ingress.Configuration
 
-	forceReload int32
-
-	t *ngx_template.Template
-
-	binary   string
 	resolver []net.IP
-
-	stats        *statsCollector
-	statusModule statusModule
 
 	// returns true if IPV6 is enabled in the pod
 	isIPV6Enabled bool
 
 	isShuttingDown bool
-
-	Proxy *TCPProxy
 
 	store store.Storer
 
@@ -250,21 +170,6 @@ func (n *NGINXController) Start() {
 	}
 
 	done := make(chan error, 1)
-	cmd := exec.Command(n.binary, "-c", cfgPath)
-
-	// put nginx in another process group to prevent it
-	// to receive signals meant for the controller
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-		Pgid:    0,
-	}
-
-	if n.cfg.EnableSSLPassthrough {
-		n.setupSSLProxy()
-	}
-
-	glog.Info("starting NGINX process...")
-	n.start(cmd)
 
 	go n.syncQueue.Run(time.Second, n.stopCh)
 	// force initial sync
@@ -276,29 +181,12 @@ func (n *NGINXController) Start() {
 			if n.isShuttingDown {
 				break
 			}
-
-			// if the nginx master process dies the workers continue to process requests,
-			// passing checks but in case of updates in ingress no updates will be
-			// reflected in the nginx configuration which can lead to confusion and report
-			// issues because of this behavior.
-			// To avoid this issue we restart nginx in case of errors.
-			if process.IsRespawnIfRequired(err) {
-				process.WaitUntilPortIsAvailable(n.cfg.ListenPorts.HTTP)
-				// release command resources
-				cmd.Process.Release()
-				cmd = exec.Command(n.binary, "-c", cfgPath)
-				// start a new nginx master process if the controller is not being stopped
-				n.start(cmd)
-			}
+			glog.Infof("Unexpected error: %v", err)
 		case evt := <-n.updateCh:
 			if n.isShuttingDown {
 				break
 			}
 			glog.V(3).Infof("Event %v received - object %v", evt.Type, evt.Obj)
-			if evt.Type == store.ConfigurationEvent {
-				n.SetForceReload(true)
-			}
-
 			n.syncQueue.Enqueue(evt.Obj)
 		case <-n.stopCh:
 			break
@@ -325,81 +213,16 @@ func (n *NGINXController) Stop() error {
 		n.syncStatus.Shutdown()
 	}
 
-	// Send stop signal to Nginx
-	glog.Info("stopping NGINX process...")
-	cmd := exec.Command(n.binary, "-c", cfgPath, "-s", "quit")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Run()
-	if err != nil {
-		return err
-	}
-
-	// Wait for the Nginx process disappear
-	timer := time.NewTicker(time.Second * 1)
-	for range timer.C {
-		if !process.IsNginxRunning() {
-			glog.Info("NGINX process has stopped")
-			timer.Stop()
-			break
-		}
-	}
-
 	return nil
-}
-
-func (n *NGINXController) start(cmd *exec.Cmd) {
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		glog.Fatalf("nginx error: %v", err)
-		n.ngxErrCh <- err
-		return
-	}
-
-	go func() {
-		n.ngxErrCh <- cmd.Wait()
-	}()
 }
 
 // DefaultEndpoint returns the default endpoint to be use as default server that returns 404.
 func (n NGINXController) DefaultEndpoint() ingress.Endpoint {
 	return ingress.Endpoint{
 		Address: "127.0.0.1",
-		Port:    fmt.Sprintf("%v", n.cfg.ListenPorts.Default),
+		Port:    fmt.Sprintf("%v", 8181),
 		Target:  &apiv1.ObjectReference{},
 	}
-}
-
-// testTemplate checks if the NGINX configuration inside the byte array is valid
-// running the command "nginx -t" using a temporal file.
-func (n NGINXController) testTemplate(cfg []byte) error {
-	if len(cfg) == 0 {
-		return fmt.Errorf("invalid nginx configuration (empty)")
-	}
-	tmpfile, err := ioutil.TempFile("", "nginx-cfg")
-	if err != nil {
-		return err
-	}
-	defer tmpfile.Close()
-	err = ioutil.WriteFile(tmpfile.Name(), cfg, 0644)
-	if err != nil {
-		return err
-	}
-	out, err := exec.Command(n.binary, "-t", "-c", tmpfile.Name()).CombinedOutput()
-	if err != nil {
-		// this error is different from the rest because it must be clear why nginx is not working
-		oe := fmt.Sprintf(`
--------------------------------------------------------------------------------
-Error: %v
-%v
--------------------------------------------------------------------------------
-`, err, string(out))
-		return errors.New(oe)
-	}
-
-	os.Remove(tmpfile.Name())
-	return nil
 }
 
 // OnUpdate is called periodically by syncQueue to keep the configuration in sync.
@@ -411,295 +234,373 @@ Error: %v
 // returning nill implies the backend will be reloaded.
 // if an error is returned means requeue the update
 func (n *NGINXController) OnUpdate(ingressCfg ingress.Configuration) error {
-	cfg := n.store.GetBackendConfiguration()
-	cfg.Resolver = n.resolver
 
-	if n.cfg.EnableSSLPassthrough {
-		servers := []*TCPServer{}
-		for _, pb := range ingressCfg.PassthroughBackends {
-			svc := pb.Service
-			if svc == nil {
-				glog.Warningf("missing service for PassthroughBackends %v", pb.Backend)
+	kongUpstreams, err := n.cfg.KongClient.Upstream().List(nil)
+	if err != nil {
+		return err
+	}
+
+	kongCertificates, err := n.cfg.KongClient.Certificate().List(nil)
+	if err != nil {
+		return err
+	}
+
+	// Create Kong Upstreams and Targets
+	for _, server := range ingressCfg.Servers {
+		if server.Hostname == "_" {
+			continue
+		}
+
+		if server.SSLCertificate != "" {
+			// check the certificate is present in kong
+			if !isCertificateInKong(server.Hostname, kongCertificates.Items) {
+				sc := bytes.NewBuffer(server.SSLCert.Raw.Cert).String()
+				sk := bytes.NewBuffer(server.SSLCert.Raw.Key).String()
+				cert := &kong.Certificate{
+					Cert:  sc,
+					Key:   sk,
+					Hosts: []string{server.Hostname},
+				}
+				glog.Infof("creating Kong SSL Certificate for host %v", server.Hostname)
+				cert, res := n.cfg.KongClient.Certificate().Create(cert)
+				if res.StatusCode != 201 {
+					glog.Errorf("Unexpected error creating Kong Certificate: %v", res.Error())
+					return res.Error()
+				}
+				kongCertificates.Items = append(kongCertificates.Items, *cert)
+
+				sni := &kong.SNI{
+					Name:        server.Hostname,
+					Certificate: cert.ID,
+				}
+				glog.Infof("creating Kong SNI for host %v and certificate id %v", server.Hostname, cert.ID)
+				_, res = n.cfg.KongClient.SNI().Create(sni)
+				if res.StatusCode != 201 {
+					glog.Errorf("Unexpected error creating Kong SNI: %v", res.Error())
+					return res.Error()
+				}
+			}
+		}
+
+		for _, location := range server.Locations {
+			backend := location.Backend
+			if backend == "default-backend" {
+				// there is no default backend in Kong
 				continue
 			}
-			port, err := strconv.Atoi(pb.Port.String())
-			if err != nil {
-				for _, sp := range svc.Spec.Ports {
-					if sp.Name == pb.Port.String() {
-						port = int(sp.Port)
-						break
+
+			for _, upstream := range ingressCfg.Backends {
+				if upstream.Name == backend {
+					var b *kong.Upstream
+
+					kongUpstreamName := server.Hostname
+					if !isUpstreamInKong(kongUpstreamName, kongUpstreams.Items) {
+						upstream := &kong.Upstream{
+							Name: kongUpstreamName,
+						}
+						glog.Infof("creating Kong Upstream with name %v", kongUpstreamName)
+						u, res := n.cfg.KongClient.Upstream().Create(upstream)
+						if res.StatusCode != 201 {
+							glog.Errorf("Unexpected error creating Kong Upstream: %v", res.Error())
+							return res.Error()
+						}
+
+						b = u
+
+						kongUpstreams.Items = append(kongUpstreams.Items, *u)
+					}
+
+					b = getKongUpstream(kongUpstreamName, kongUpstreams.Items)
+					if b == nil {
+						glog.Errorf("there is no upstream for hostname %v", kongUpstreamName)
+						return nil
+					}
+
+					// reconcile the state between the ingress controller and kong comparing
+					// the endpoints in Kubernetes and the targets in the kong upstream.
+					// To avoid downtimes we create the new targets first and then remove
+					// the killed ones.
+					kongTargets, err := n.cfg.KongClient.Target().List(nil, kongUpstreamName)
+					if err != nil {
+						return err
+					}
+
+					oldTargets := sets.NewString()
+					for _, kongTarget := range kongTargets.Items {
+						if !oldTargets.Has(kongTarget.Target) {
+							oldTargets.Insert(kongTarget.Target)
+						}
+					}
+
+					newTargets := sets.NewString()
+					for _, endpoint := range upstream.Endpoints {
+						nt := fmt.Sprintf("%v:%v", endpoint.Address, endpoint.Port)
+						if !newTargets.Has(nt) {
+							newTargets.Insert(nt)
+						}
+					}
+
+					add := newTargets.Difference(oldTargets).List()
+					remove := oldTargets.Difference(newTargets).List()
+
+					for _, endpoint := range add {
+						target := &kong.Target{
+							Target:   endpoint,
+							Upstream: b.ID,
+						}
+						glog.Infof("creating Kong Target %v for upstream %v", endpoint, b.ID)
+						_, res := n.cfg.KongClient.Target().Create(target, kongUpstreamName)
+						if res.StatusCode != 201 {
+							glog.Errorf("Unexpected error creating Kong Upstream: %v", res.Error())
+							return res.Error()
+						}
+					}
+
+					time.Sleep(100 * time.Millisecond)
+
+					for _, endpoint := range remove {
+						for _, kongTarget := range kongTargets.Items {
+							if kongTarget.Target != endpoint {
+								continue
+							}
+							glog.Infof("deleting Kong Target %v", kongTarget)
+							err := n.cfg.KongClient.Target().Delete(kongTarget.ID, b.ID)
+							if err != nil {
+								glog.Errorf("Unexpected error deleting Kong Upstream: %v", err)
+								return err
+							}
+						}
 					}
 				}
-			} else {
-				for _, sp := range svc.Spec.Ports {
-					if sp.Port == int32(port) {
-						port = int(sp.Port)
-						break
-					}
-				}
-			}
-
-			//TODO: Allow PassthroughBackends to specify they support proxy-protocol
-			servers = append(servers, &TCPServer{
-				Hostname:      pb.Hostname,
-				IP:            svc.Spec.ClusterIP,
-				Port:          port,
-				ProxyProtocol: false,
-			})
-		}
-
-		n.Proxy.ServerList = servers
-	}
-
-	// we need to check if the status module configuration changed
-	if cfg.EnableVtsStatus {
-		n.setupMonitor(vtsStatusModule)
-	} else {
-		n.setupMonitor(defaultStatusModule)
-	}
-
-	// NGINX cannot resize the hash tables used to store server names.
-	// For this reason we check if the defined size defined is correct
-	// for the FQDN defined in the ingress rules adjusting the value
-	// if is required.
-	// https://trac.nginx.org/nginx/ticket/352
-	// https://trac.nginx.org/nginx/ticket/631
-	var longestName int
-	var serverNameBytes int
-	redirectServers := make(map[string]string)
-	for _, srv := range ingressCfg.Servers {
-		if longestName < len(srv.Hostname) {
-			longestName = len(srv.Hostname)
-		}
-		serverNameBytes += len(srv.Hostname)
-		if srv.RedirectFromToWWW {
-			var n string
-			if strings.HasPrefix(srv.Hostname, "www.") {
-				n = strings.TrimLeft(srv.Hostname, "www.")
-			} else {
-				n = fmt.Sprintf("www.%v", srv.Hostname)
-			}
-			glog.V(3).Infof("creating redirect from %v to %v", srv.Hostname, n)
-			if _, ok := redirectServers[n]; !ok {
-				found := false
-				for _, esrv := range ingressCfg.Servers {
-					if esrv.Hostname == n {
-						found = true
-						break
-					}
-				}
-				if !found {
-					redirectServers[n] = srv.Hostname
-				}
-			}
-		}
-	}
-	if cfg.ServerNameHashBucketSize == 0 {
-		nameHashBucketSize := nginxHashBucketSize(longestName)
-		glog.V(3).Infof("adjusting ServerNameHashBucketSize variable to %v", nameHashBucketSize)
-		cfg.ServerNameHashBucketSize = nameHashBucketSize
-	}
-	serverNameHashMaxSize := nextPowerOf2(serverNameBytes)
-	if cfg.ServerNameHashMaxSize < serverNameHashMaxSize {
-		glog.V(3).Infof("adjusting ServerNameHashMaxSize variable to %v", serverNameHashMaxSize)
-		cfg.ServerNameHashMaxSize = serverNameHashMaxSize
-	}
-
-	// the limit of open files is per worker process
-	// and we leave some room to avoid consuming all the FDs available
-	wp, err := strconv.Atoi(cfg.WorkerProcesses)
-	glog.V(3).Infof("number of worker processes: %v", wp)
-	if err != nil {
-		wp = 1
-	}
-	maxOpenFiles := (sysctlFSFileMax() / wp) - 1024
-	glog.V(3).Infof("maximum number of open file descriptors : %v", sysctlFSFileMax())
-	if maxOpenFiles < 1024 {
-		// this means the value of RLIMIT_NOFILE is too low.
-		maxOpenFiles = 1024
-	}
-
-	setHeaders := map[string]string{}
-	if cfg.ProxySetHeaders != "" {
-		cmap, err := n.store.GetConfigMap(cfg.ProxySetHeaders)
-		if err != nil {
-			glog.Warningf("unexpected error reading configmap %v: %v", cfg.ProxySetHeaders, err)
-		}
-
-		setHeaders = cmap.Data
-	}
-
-	addHeaders := map[string]string{}
-	if cfg.AddHeaders != "" {
-		cmap, err := n.store.GetConfigMap(cfg.AddHeaders)
-		if err != nil {
-			glog.Warningf("unexpected error reading configmap %v: %v", cfg.AddHeaders, err)
-		}
-
-		addHeaders = cmap.Data
-	}
-
-	sslDHParam := ""
-	if cfg.SSLDHParam != "" {
-		secretName := cfg.SSLDHParam
-
-		secret, err := n.store.GetSecret(secretName)
-		if err != nil {
-			glog.Warningf("unexpected error reading secret %v: %v", secretName, err)
-		}
-
-		nsSecName := strings.Replace(secretName, "/", "-", -1)
-
-		dh, ok := secret.Data["dhparam.pem"]
-		if ok {
-			pemFileName, err := ssl.AddOrUpdateDHParam(nsSecName, dh, n.fileSystem)
-			if err != nil {
-				glog.Warningf("unexpected error adding or updating dhparam %v file: %v", nsSecName, err)
-			} else {
-				sslDHParam = pemFileName
 			}
 		}
 	}
 
-	cfg.SSLDHParam = sslDHParam
-
-	tc := ngx_config.TemplateConfig{
-		ProxySetHeaders:         setHeaders,
-		AddHeaders:              addHeaders,
-		MaxOpenFiles:            maxOpenFiles,
-		BacklogSize:             sysctlSomaxconn(),
-		Backends:                ingressCfg.Backends,
-		PassthroughBackends:     ingressCfg.PassthroughBackends,
-		Servers:                 ingressCfg.Servers,
-		TCPBackends:             ingressCfg.TCPEndpoints,
-		UDPBackends:             ingressCfg.UDPEndpoints,
-		HealthzURI:              ngxHealthPath,
-		CustomErrors:            len(cfg.CustomHTTPErrors) > 0,
-		Cfg:                     cfg,
-		IsIPV6Enabled:           n.isIPV6Enabled && !cfg.DisableIpv6,
-		RedirectServers:         redirectServers,
-		IsSSLPassthroughEnabled: n.cfg.EnableSSLPassthrough,
-		ListenPorts:             n.cfg.ListenPorts,
-		PublishService:          n.GetPublishService(),
-	}
-
-	content, err := n.t.Write(tc)
-
+	kongServices, err := n.cfg.KongClient.Services().List(nil)
 	if err != nil {
 		return err
 	}
 
-	err = n.testTemplate(content)
-	if err != nil {
-		return err
-	}
+	// Check if the endpoints exists as a service in kong
+	for _, server := range ingressCfg.Servers {
+		if server.Hostname == "_" {
+			continue
+		}
 
-	if glog.V(2) {
-		src, _ := ioutil.ReadFile(cfgPath)
-		if !bytes.Equal(src, content) {
-			tmpfile, err := ioutil.TempFile("", "new-nginx-cfg")
-			if err != nil {
-				return err
+		for _, location := range server.Locations {
+			backend := location.Backend
+			for _, upstream := range ingressCfg.Backends {
+				proto := "http"
+				if upstream.Secure {
+					proto = "https"
+				}
+
+				if upstream.Name == backend {
+					name := buildName(backend, location)
+					if !isServiceInKong(name, kongServices.Items) {
+						s := &kong.Service{
+							Name:           name,
+							Path:           "/",
+							Protocol:       proto,
+							Host:           server.Hostname,
+							Port:           80,
+							ConnectTimeout: location.Proxy.ConnectTimeout,
+							ReadTimeout:    location.Proxy.ReadTimeout,
+							WriteTimeout:   location.Proxy.SendTimeout,
+							Retries:        5,
+						}
+						glog.Infof("creating Kong Service name %v", name)
+						_, res := n.cfg.KongClient.Services().Create(s)
+						if res.StatusCode != 201 {
+							glog.Errorf("Unexpected error creating Kong Service: %v", res.Error())
+							return res.Error()
+						}
+					}
+
+					break
+				}
 			}
-			defer tmpfile.Close()
-			err = ioutil.WriteFile(tmpfile.Name(), content, 0644)
-			if err != nil {
-				return err
-			}
-
-			// executing diff can return exit code != 0
-			diffOutput, _ := exec.Command("diff", "-u", cfgPath, tmpfile.Name()).CombinedOutput()
-
-			glog.Infof("NGINX configuration diff\n")
-			glog.Infof("%v\n", string(diffOutput))
-
-			// Do not use defer to remove the temporal file.
-			// This is helpful when there is an error in the
-			// temporal configuration (we can manually inspect the file).
-			// Only remove the file when no error occurred.
-			os.Remove(tmpfile.Name())
 		}
 	}
 
-	err = ioutil.WriteFile(cfgPath, content, 0644)
+	kongServices, err = n.cfg.KongClient.Services().List(nil)
 	if err != nil {
 		return err
 	}
 
-	o, err := exec.Command(n.binary, "-s", "reload", "-c", cfgPath).CombinedOutput()
+	kongRoutes, err := n.cfg.KongClient.Routes().List(nil)
 	if err != nil {
-		return fmt.Errorf("%v\n%v", err, string(o))
+		return err
+	}
+
+	// Routes
+	for _, server := range ingressCfg.Servers {
+		if server.Hostname == "_" {
+			continue
+		}
+
+		glog.Infof("Configuring routes for server %v", server.Hostname)
+		routeUpdated := false
+
+		protos := []string{"http"}
+		if server.SSLCertificate != "" {
+			protos = append(protos, "https")
+		}
+
+		for _, location := range server.Locations {
+			backend := location.Backend
+			if backend == "" {
+				continue
+			}
+
+			name := buildName(backend, location)
+			svc := getKongService(name, kongServices.Items)
+			if svc == nil {
+				glog.Warningf("there is no Kong service with name %v", name)
+				continue
+			}
+
+			r := &kong.Route{
+				Paths:     []string{location.Path},
+				Protocols: protos,
+				Hosts:     []string{server.Hostname},
+				Service:   kong.InlineService{ID: svc.ID},
+			}
+			if !isRouteInKong(r, kongRoutes.Items) {
+				routeUpdated = true
+				glog.Infof("creating Kong Route for host %v, path %v and service %v", server.Hostname, location.Path, svc.ID)
+				r, res := n.cfg.KongClient.Routes().Create(r)
+				if res.StatusCode != 201 {
+					glog.Errorf("Unexpected error creating Kong Route: %v", res.Error())
+					return res.Error()
+				}
+
+				kongRoutes.Items = append(kongRoutes.Items, *r)
+			} else {
+				// the route could exists but the protocols could be different (we are adding ssl)
+				route := getKongRoute(server.Hostname, location.Path, kongRoutes.Items)
+
+				for _, proto := range protos {
+					found := false
+					for _, rp := range route.Protocols {
+						if proto == rp {
+							found = true
+							break
+						}
+					}
+					if !found {
+						route.Protocols = protos
+						_, res := n.cfg.KongClient.Routes().Patch(route)
+						if res.StatusCode != 201 {
+							glog.Errorf("Unexpected error updating Kong Route: %v", res.Error())
+							return res.Error()
+						}
+					}
+				}
+			}
+		}
+
+		if !routeUpdated {
+			glog.Infof("there is no route updates to server %v", server.Hostname)
+		}
 	}
 
 	return nil
 }
 
-// nginxHashBucketSize computes the correct nginx hash_bucket_size for a hash with the given longest key
-func nginxHashBucketSize(longestString int) int {
-	// See https://github.com/kubernetes/ingress-nginxs/issues/623 for an explanation
-	wordSize := 8 // Assume 64 bit CPU
-	n := longestString + 2
-	aligned := (n + wordSize - 1) & ^(wordSize - 1)
-	rawSize := wordSize + wordSize + aligned
-	return nextPowerOf2(rawSize)
+func buildName(backend string, location *ingress.Location) string {
+	r := strings.Replace(location.Path, "/", "-", -1)
+	return strings.TrimSuffix(fmt.Sprintf("%v%v", backend, r), "-")
 }
 
-// http://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
-// https://play.golang.org/p/TVSyCcdxUh
-func nextPowerOf2(v int) int {
-	v--
-	v |= v >> 1
-	v |= v >> 2
-	v |= v >> 4
-	v |= v >> 8
-	v |= v >> 16
-	v++
-
-	return v
-}
-
-func (n *NGINXController) setupSSLProxy() {
-	sslPort := n.cfg.ListenPorts.HTTPS
-	proxyPort := n.cfg.ListenPorts.SSLProxy
-
-	glog.Info("starting TLS proxy for SSL passthrough")
-	n.Proxy = &TCPProxy{
-		Default: &TCPServer{
-			Hostname:      "localhost",
-			IP:            "127.0.0.1",
-			Port:          proxyPort,
-			ProxyProtocol: true,
-		},
-	}
-
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", sslPort))
-	if err != nil {
-		glog.Fatalf("%v", err)
-	}
-
-	proxyList := &proxyproto.Listener{Listener: listener}
-
-	// start goroutine that accepts tcp connections in port 443
-	go func() {
-		for {
-			var conn net.Conn
-			var err error
-
-			if n.store.GetBackendConfiguration().UseProxyProtocol {
-				// we need to wrap the listener in order to decode
-				// proxy protocol before handling the connection
-				conn, err = proxyList.Accept()
-			} else {
-				conn, err = listener.Accept()
-			}
-
-			if err != nil {
-				glog.Warningf("unexpected error accepting tcp connection: %v", err)
-				continue
-			}
-
-			glog.V(3).Infof("remote address %s to local %s", conn.RemoteAddr(), conn.LocalAddr())
-			go n.Proxy.Handle(conn)
+func getKongRoute(hostname, path string, routes []kong.Route) *kong.Route {
+	for _, r := range routes {
+		if sets.NewString(r.Paths...).Has(path) &&
+			sets.NewString(r.Hosts...).Has(hostname) {
+			return &r
 		}
-	}()
+	}
+
+	return nil
+}
+
+func getKongService(name string, services []kong.Service) *kong.Service {
+	for _, svc := range services {
+		if svc.Name == name {
+			return &svc
+		}
+	}
+
+	return nil
+}
+
+func getKongUpstream(name string, upstreams []kong.Upstream) *kong.Upstream {
+	for _, upstream := range upstreams {
+		if upstream.Name == name {
+			return &upstream
+		}
+	}
+
+	return nil
+}
+
+func getUpstreamTarget(target string, targets []kong.Target) *kong.Target {
+	for _, ut := range targets {
+		if ut.Target == target {
+			return &ut
+		}
+	}
+
+	return nil
+}
+
+func isTargetInKong(host, port string, targets []kong.Target) bool {
+	for _, t := range targets {
+		if t.Target == fmt.Sprintf("%v:%v", host, port) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isCertificateInKong(host string, certs []kong.Certificate) bool {
+	for _, cert := range certs {
+		s := sets.NewString(cert.Hosts...)
+		if s.Has(host) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isUpstreamInKong(name string, upstreams []kong.Upstream) bool {
+	for _, upstream := range upstreams {
+		if upstream.Name == name {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isServiceInKong(name string, services []kong.Service) bool {
+	for _, svc := range services {
+		if svc.Name == name {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isRouteInKong(route *kong.Route, routes []kong.Route) bool {
+	for _, eRoute := range routes {
+		if route.Equal(&eRoute) {
+			return true
+		}
+	}
+
+	return false
 }

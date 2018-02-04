@@ -116,6 +116,7 @@ const (
 type Event struct {
 	Type EventType
 	Obj  interface{}
+	Old  interface{}
 }
 
 // Lister returns the stores for ingresses, services, endpoints, secrets and configmaps.

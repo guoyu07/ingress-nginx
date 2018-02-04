@@ -30,4 +30,4 @@ COPY . /
 
 ENTRYPOINT ["/usr/bin/dumb-init"]
 
-CMD ["/nginx-ingress-controller"]
+CMD ["/kong-ingress-controller"]

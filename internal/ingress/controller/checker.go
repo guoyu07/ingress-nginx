@@ -17,13 +17,7 @@ limitations under the License.
 package controller
 
 import (
-	"fmt"
 	"net/http"
-	"strconv"
-	"strings"
-
-	"github.com/ncabatoff/process-exporter/proc"
-	"github.com/pkg/errors"
 )
 
 // Name returns the healthcheck name
@@ -33,14 +27,14 @@ func (n NGINXController) Name() string {
 
 // Check returns if the nginx healthz endpoint is returning ok (status code 200)
 func (n *NGINXController) Check(_ *http.Request) error {
-	res, err := http.Get(fmt.Sprintf("http://0.0.0.0:%v%v", n.cfg.ListenPorts.Status, ngxHealthPath))
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != 200 {
-		return fmt.Errorf("ingress controller is not healthy")
-	}
+	/* 	res, err := http.Get(fmt.Sprintf("http://0.0.0.0:%v%v", n.cfg.ListenPorts.Status, ngxHealthPath))
+	   	if err != nil {
+	   		return err
+	   	}
+	   	defer res.Body.Close()
+	   	if res.StatusCode != 200 {
+	   		return fmt.Errorf("ingress controller is not healthy")
+	   	}
 
 	// check the nginx master process is running
 	fs, err := proc.NewFS("/proc")
@@ -58,4 +52,8 @@ func (n *NGINXController) Check(_ *http.Request) error {
 	_, err = fs.NewProc(pid)
 
 	return err
+
+	*/
+
+	return nil
 }

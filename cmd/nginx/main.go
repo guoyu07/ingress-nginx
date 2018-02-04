@@ -41,6 +41,7 @@ import (
 	"k8s.io/ingress-nginx/internal/file"
 	"k8s.io/ingress-nginx/internal/ingress/controller"
 	"k8s.io/ingress-nginx/internal/k8s"
+	"k8s.io/ingress-nginx/internal/kong"
 	"k8s.io/ingress-nginx/internal/net/ssl"
 	"k8s.io/ingress-nginx/version"
 )
@@ -129,6 +130,15 @@ func main() {
 
 	conf.Client = kubeClient
 
+	kongClient, err := kong.NewRESTClient(&rest.Config{
+		Host:    conf.KongURL,
+		Timeout: time.Second * 2,
+	})
+	if err != nil {
+		glog.Fatalf("Error creating Kong Rest client: %v", err)
+	}
+	conf.KongClient = kongClient
+
 	ngx := controller.NewNGINXController(conf, fs)
 
 	go handleSigterm(ngx, func(code int) {
@@ -136,7 +146,7 @@ func main() {
 	})
 
 	mux := http.NewServeMux()
-	go registerHandlers(conf.EnableProfiling, conf.ListenPorts.Health, ngx, mux)
+	go registerHandlers(conf.EnableProfiling, 10254, ngx, mux)
 
 	ngx.Start()
 }
@@ -244,7 +254,6 @@ func registerHandlers(enableProfiling bool, port int, ic *controller.NGINXContro
 	// expose health check endpoint (/healthz)
 	healthz.InstallHandler(mux,
 		healthz.PingHealthz,
-		ic,
 	)
 
 	mux.Handle("/metrics", promhttp.Handler())

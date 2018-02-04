@@ -52,16 +52,6 @@ type Configuration struct {
 	Backends []*Backend `json:"backends,omitEmpty"`
 	// Servers
 	Servers []*Server `json:"servers,omitEmpty"`
-	// TCPEndpoints contain endpoints for tcp streams handled by this backend
-	// +optional
-	TCPEndpoints []L4Service `json:"tcpEndpoints,omitempty"`
-	// UDPEndpoints contain endpoints for udp streams handled by this backend
-	// +optional
-	UDPEndpoints []L4Service `json:"udpEndpoints,omitempty"`
-	// PassthroughBackend contains the backends used for SSL passthrough.
-	// It contains information about the associated Server Name Indication (SNI).
-	// +optional
-	PassthroughBackends []*SSLPassthroughBackend `json:"passthroughBackends,omitempty"`
 }
 
 // Backend describes one or more remote server/s (endpoints) associated with a service
@@ -142,6 +132,9 @@ type Server struct {
 	SSLFullChainCertificate string `json:"sslFullChainCertificate"`
 	// SSLExpireTime has the expire date of this certificate
 	SSLExpireTime time.Time `json:"sslExpireTime"`
+
+	SSLCert *SSLCert `json:"-"`
+
 	// SSLPemChecksum returns the checksum of the certificate file on disk.
 	// There is no restriction in the hash generator. This checksim can be
 	// used to  determine if the secret changed without the use of file
@@ -257,43 +250,4 @@ type Location struct {
 	// original location.
 	// +optional
 	XForwardedPrefix bool `json:"xForwardedPrefix,omitempty"`
-}
-
-// SSLPassthroughBackend describes a SSL upstream server configured
-// as passthrough (no TLS termination in the ingress controller)
-// The endpoints must provide the TLS termination exposing the required SSL certificate.
-// The ingress controller only pipes the underlying TCP connection
-type SSLPassthroughBackend struct {
-	Service *apiv1.Service     `json:"service,omitEmpty"`
-	Port    intstr.IntOrString `json:"port"`
-	// Backend describes the endpoints to use.
-	Backend string `json:"namespace,omitempty"`
-	// Hostname returns the FQDN of the server
-	Hostname string `json:"hostname"`
-}
-
-// L4Service describes a L4 Ingress service.
-type L4Service struct {
-	// Port external port to expose
-	Port int `json:"port"`
-	// Backend of the service
-	Backend L4Backend `json:"backend"`
-	// Endpoints active endpoints of the service
-	Endpoints []Endpoint `json:"endpoins,omitEmpty"`
-}
-
-// L4Backend describes the kubernetes service behind L4 Ingress service
-type L4Backend struct {
-	Port      intstr.IntOrString `json:"port"`
-	Name      string             `json:"name"`
-	Namespace string             `json:"namespace"`
-	Protocol  apiv1.Protocol     `json:"protocol"`
-	// +optional
-	ProxyProtocol ProxyProtocol `json:"proxyProtocol"`
-}
-
-// ProxyProtocol describes the proxy protocol configuration
-type ProxyProtocol struct {
-	Decode bool `json:"decode"`
-	Encode bool `json:"encode"`
 }

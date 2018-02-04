@@ -18,13 +18,10 @@ package controller
 
 import (
 	"fmt"
-	"math/rand"
 	"net"
 	"reflect"
 	"sort"
 	"strconv"
-	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/golang/glog"
@@ -38,8 +35,7 @@ import (
 	"k8s.io/ingress-nginx/internal/ingress"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/healthcheck"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/proxy"
-	ngx_config "k8s.io/ingress-nginx/internal/ingress/controller/config"
-	"k8s.io/ingress-nginx/internal/k8s"
+	"k8s.io/ingress-nginx/internal/kong"
 	"k8s.io/ingress-nginx/internal/task"
 )
 
@@ -51,6 +47,9 @@ const (
 
 // Configuration contains all the settings required by an Ingress controller
 type Configuration struct {
+	KongURL    string
+	KongClient *kong.RestClient
+
 	APIServerHost  string
 	KubeConfigFile string
 	Client         clientset.Interface
@@ -64,11 +63,6 @@ type Configuration struct {
 
 	ForceNamespaceIsolation bool
 
-	// optional
-	TCPConfigMapName string
-	// optional
-	UDPConfigMapName string
-
 	DefaultHealthzURL     string
 	DefaultSSLCertificate string
 
@@ -79,12 +73,6 @@ type Configuration struct {
 	UseNodeInternalIP      bool
 	ElectionID             string
 	UpdateStatusOnShutdown bool
-
-	SortBackends bool
-
-	ListenPorts *ngx_config.ListenPorts
-
-	EnableSSLPassthrough bool
 
 	EnableProfiling bool
 
@@ -133,185 +121,23 @@ func (n *NGINXController) syncIngress(item interface{}) error {
 	})
 
 	upstreams, servers := n.getBackendServers(ings)
-	var passUpstreams []*ingress.SSLPassthroughBackend
-
-	for _, server := range servers {
-		if !server.SSLPassthrough {
-			continue
-		}
-
-		for _, loc := range server.Locations {
-			if loc.Path != rootLocation {
-				glog.Warningf("ignoring path %v of ssl passthrough host %v", loc.Path, server.Hostname)
-				continue
-			}
-			passUpstreams = append(passUpstreams, &ingress.SSLPassthroughBackend{
-				Backend:  loc.Backend,
-				Hostname: server.Hostname,
-				Service:  loc.Service,
-				Port:     loc.Port,
-			})
-			break
-		}
-	}
 
 	pcfg := ingress.Configuration{
-		Backends:            upstreams,
-		Servers:             servers,
-		TCPEndpoints:        n.getStreamServices(n.cfg.TCPConfigMapName, apiv1.ProtocolTCP),
-		UDPEndpoints:        n.getStreamServices(n.cfg.UDPConfigMapName, apiv1.ProtocolUDP),
-		PassthroughBackends: passUpstreams,
+		Backends: upstreams,
+		Servers:  servers,
 	}
 
-	if !n.isForceReload() && n.runningConfig.Equal(&pcfg) {
-		glog.V(3).Infof("skipping backend reload (no changes detected)")
-		return nil
-	}
-
-	glog.Infof("backend reload required")
+	glog.Infof("backend update required")
 
 	err := n.OnUpdate(pcfg)
 	if err != nil {
-		incReloadErrorCount()
-		glog.Errorf("unexpected failure restarting the backend: \n%v", err)
+		glog.Errorf("unexpected failure updating the backend: \n%v", err)
 		return err
 	}
 
-	glog.Infof("ingress backend successfully reloaded...")
-	incReloadCount()
-	setSSLExpireTime(servers)
-
 	n.runningConfig = &pcfg
-	n.SetForceReload(false)
 
 	return nil
-}
-
-func (n *NGINXController) getStreamServices(configmapName string, proto apiv1.Protocol) []ingress.L4Service {
-	glog.V(3).Infof("obtaining information about stream services of type %v located in configmap %v", proto, configmapName)
-	if configmapName == "" {
-		// no configmap configured
-		return []ingress.L4Service{}
-	}
-
-	_, _, err := k8s.ParseNameNS(configmapName)
-	if err != nil {
-		glog.Errorf("unexpected error reading configmap %v: %v", configmapName, err)
-		return []ingress.L4Service{}
-	}
-
-	configmap, err := n.store.GetConfigMap(configmapName)
-	if err != nil {
-		glog.Errorf("unexpected error reading configmap %v: %v", configmapName, err)
-		return []ingress.L4Service{}
-	}
-
-	var svcs []ingress.L4Service
-	var svcProxyProtocol ingress.ProxyProtocol
-	// k -> port to expose
-	// v -> <namespace>/<service name>:<port from service to be used>
-
-	rp := []int{
-		n.cfg.ListenPorts.HTTP,
-		n.cfg.ListenPorts.HTTPS,
-		n.cfg.ListenPorts.SSLProxy,
-		n.cfg.ListenPorts.Status,
-		n.cfg.ListenPorts.Health,
-		n.cfg.ListenPorts.Default,
-	}
-	reserverdPorts := sets.NewInt(rp...)
-
-	for k, v := range configmap.Data {
-		externalPort, err := strconv.Atoi(k)
-		if err != nil {
-			glog.Warningf("%v is not valid as a TCP/UDP port", k)
-			continue
-		}
-
-		if reserverdPorts.Has(externalPort) {
-			glog.Warningf("port %v cannot be used for TCP or UDP services. It is reserved for the Ingress controller", k)
-			continue
-		}
-
-		nsSvcPort := strings.Split(v, ":")
-		if len(nsSvcPort) < 2 {
-			glog.Warningf("invalid format (namespace/name:port:[PROXY]:[PROXY]) '%v'", k)
-			continue
-		}
-
-		nsName := nsSvcPort[0]
-		svcPort := nsSvcPort[1]
-		svcProxyProtocol.Decode = false
-		svcProxyProtocol.Encode = false
-
-		// Proxy protocol is possible if the service is TCP
-		if len(nsSvcPort) >= 3 && proto == apiv1.ProtocolTCP {
-			if len(nsSvcPort) >= 3 && strings.ToUpper(nsSvcPort[2]) == "PROXY" {
-				svcProxyProtocol.Decode = true
-			}
-			if len(nsSvcPort) == 4 && strings.ToUpper(nsSvcPort[3]) == "PROXY" {
-				svcProxyProtocol.Encode = true
-			}
-		}
-
-		svcNs, svcName, err := k8s.ParseNameNS(nsName)
-		if err != nil {
-			glog.Warningf("%v", err)
-			continue
-		}
-
-		svc, err := n.store.GetService(nsName)
-		if err != nil {
-			glog.Warningf("error getting service %v: %v", nsName, err)
-			continue
-		}
-
-		var endps []ingress.Endpoint
-		targetPort, err := strconv.Atoi(svcPort)
-		if err != nil {
-			glog.V(3).Infof("searching service %v endpoints using the name '%v'", svcNs, svcName, svcPort)
-			for _, sp := range svc.Spec.Ports {
-				if sp.Name == svcPort {
-					if sp.Protocol == proto {
-						endps = n.getEndpoints(svc, &sp, proto, &healthcheck.Config{})
-						break
-					}
-				}
-			}
-		} else {
-			// we need to use the TargetPort (where the endpoints are running)
-			glog.V(3).Infof("searching service %v/%v endpoints using the target port '%v'", svcNs, svcName, targetPort)
-			for _, sp := range svc.Spec.Ports {
-				if sp.Port == int32(targetPort) {
-					if sp.Protocol == proto {
-						endps = n.getEndpoints(svc, &sp, proto, &healthcheck.Config{})
-						break
-					}
-				}
-			}
-		}
-
-		// stream services cannot contain empty upstreams and there is no
-		// default backend equivalent
-		if len(endps) == 0 {
-			glog.Warningf("service %v/%v does not have any active endpoints for port %v and protocol %v", svcNs, svcName, svcPort, proto)
-			continue
-		}
-
-		svcs = append(svcs, ingress.L4Service{
-			Port: externalPort,
-			Backend: ingress.L4Backend{
-				Name:          svcName,
-				Namespace:     svcNs,
-				Port:          intstr.FromString(svcPort),
-				Protocol:      proto,
-				ProxyProtocol: svcProxyProtocol,
-			},
-			Endpoints: endps,
-		})
-	}
-
-	return svcs
 }
 
 // getDefaultUpstream returns an upstream associated with the
@@ -543,12 +369,6 @@ func (n *NGINXController) getBackendServers(ingresses []*extensions.Ingress) ([]
 		aUpstreams = append(aUpstreams, upstream)
 	}
 
-	if n.cfg.SortBackends {
-		sort.SliceStable(aUpstreams, func(a, b int) bool {
-			return aUpstreams[a].Name < aUpstreams[b].Name
-		})
-	}
-
 	aServers := make([]*ingress.Server, 0, len(servers))
 	for _, value := range servers {
 		sort.SliceStable(value.Locations, func(i, j int) bool {
@@ -741,17 +561,6 @@ func (n *NGINXController) serviceEndpoints(svcKey, backendPort string,
 				glog.Warningf("service %v does not have any active endpoints", svcKey)
 			}
 
-			if n.cfg.SortBackends {
-				sort.SliceStable(endps, func(i, j int) bool {
-					iName := endps[i].Address
-					jName := endps[j].Address
-					if iName != jName {
-						return iName < jName
-					}
-
-					return endps[i].Port < endps[j].Port
-				})
-			}
 			upstreams = append(upstreams, endps...)
 			break
 		}
@@ -778,14 +587,6 @@ func (n *NGINXController) serviceEndpoints(svcKey, backendPort string,
 
 		upstreams = append(upstreams, endps...)
 		return upstreams, nil
-	}
-
-	if !n.cfg.SortBackends {
-		rand.Seed(time.Now().UnixNano())
-		for i := range upstreams {
-			j := rand.Intn(i + 1)
-			upstreams[i], upstreams[j] = upstreams[j], upstreams[i]
-		}
 	}
 
 	return upstreams, nil
@@ -1016,6 +817,7 @@ func (n *NGINXController) createServers(data []*extensions.Ingress,
 			servers[host].SSLFullChainCertificate = cert.FullChainPemFileName
 			servers[host].SSLPemChecksum = cert.PemSHA
 			servers[host].SSLExpireTime = cert.ExpireTime
+			servers[host].SSLCert = cert
 
 			if cert.ExpireTime.Before(time.Now().Add(240 * time.Hour)) {
 				glog.Warningf("ssl certificate for host %v is about to expire in 10 days", host)
@@ -1122,18 +924,4 @@ func (n *NGINXController) getEndpoints(
 
 	glog.V(3).Infof("endpoints found: %v", upsServers)
 	return upsServers
-}
-
-func (n *NGINXController) isForceReload() bool {
-	return atomic.LoadInt32(&n.forceReload) != 0
-}
-
-// SetForceReload sets if the ingress controller should be reloaded or not
-func (n *NGINXController) SetForceReload(shouldReload bool) {
-	if shouldReload {
-		atomic.StoreInt32(&n.forceReload, 1)
-		n.syncQueue.Enqueue(&extensions.Ingress{})
-	} else {
-		atomic.StoreInt32(&n.forceReload, 0)
-	}
 }

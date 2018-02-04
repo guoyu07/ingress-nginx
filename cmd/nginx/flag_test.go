@@ -58,7 +58,3 @@ func TestDefaults(t *testing.T) {
 		t.Fatal("expected a configuration but nil returned")
 	}
 }
-
-func TestSetupSSLProxy(t *testing.T) {
-	// TODO
-}
