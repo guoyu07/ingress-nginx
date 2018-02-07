@@ -1,6 +1,11 @@
 package kong
 
 import (
+	"encoding/json"
+	"fmt"
+	"regexp"
+
+	"github.com/blang/semver"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
@@ -87,6 +92,31 @@ func (c *RestClient) Certificate() CertificateInterface {
 		},
 	}
 }
+
+func (c *RestClient) GetVersion() (semver.Version, error) {
+	var info map[string]interface{}
+	data, err := c.RESTClient().Get().RequestURI("/").DoRaw()
+	if err != nil {
+		return semver.Version{}, err
+	}
+	if err := json.Unmarshal(data, &info); err != nil {
+		return semver.Version{}, err
+	}
+
+	if version, ok := info["version"]; ok {
+		v := version.(string)
+		// fix bad version formats like 0.13.0preview1
+		re := regexp.MustCompile(`(.*\d)(preview.*)`)
+		if re.MatchString(v) {
+			v = re.ReplaceAllString(v, "$1-$2")
+		}
+
+		return semver.Make(v)
+	}
+
+	return semver.Version{}, fmt.Errorf("Unknown Kong version")
+}
+
 func NewRESTClient(c *rest.Config) (*RestClient, error) {
 	c.ContentConfig = dynamic.ContentConfig()
 	cl, err := rest.UnversionedRESTClientFor(c)

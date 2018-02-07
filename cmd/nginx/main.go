@@ -28,6 +28,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blang/semver"
 	"github.com/golang/glog"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -137,6 +138,18 @@ func main() {
 	if err != nil {
 		glog.Fatalf("Error creating Kong Rest client: %v", err)
 	}
+
+	v, err := kongClient.GetVersion()
+	if err != nil {
+		glog.Fatalf("%v", err)
+	}
+
+	if !v.GTE(semver.MustParse("0.13.0-preview1")) {
+		glog.Fatalf("The version %s is not compatible with the Kong Ingress Controller. It requires Kong 0.13.0 or higher.", v)
+	}
+
+	glog.Infof("kong version: %s", v)
+
 	conf.KongClient = kongClient
 
 	ngx := controller.NewNGINXController(conf, fs)
