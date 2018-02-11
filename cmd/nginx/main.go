@@ -24,7 +24,6 @@ import (
 	"net/http/pprof"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -70,20 +69,6 @@ func main() {
 	if err != nil {
 		handleFatalInitError(err)
 	}
-
-	ns, name, err := k8s.ParseNameNS(conf.DefaultService)
-	if err != nil {
-		glog.Fatal(err)
-	}
-
-	_, err = kubeClient.CoreV1().Services(ns).Get(name, metav1.GetOptions{})
-	if err != nil {
-		if strings.Contains(err.Error(), "cannot get services in the namespace") {
-			glog.Fatalf("✖ It seems the cluster it is running with Authorization enabled (like RBAC) and there is no permissions for the ingress controller. Please check the configuration")
-		}
-		glog.Fatalf("no service with name %v found: %v", conf.DefaultService, err)
-	}
-	glog.Infof("validated %v as the default backend", conf.DefaultService)
 
 	if conf.PublishService != "" {
 		ns, name, err := k8s.ParseNameNS(conf.PublishService)
