@@ -94,6 +94,3 @@ func TestHandleSigterm(t *testing.T) {
 		t.Errorf("unexpected error sending SIGTERM signal")
 	}
 }
-
-func TestRegisterHandlers(t *testing.T) {
-}
