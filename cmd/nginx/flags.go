@@ -18,6 +18,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -77,9 +78,6 @@ func parseFlags() (bool, *controller.Configuration, error) {
 			`Force namespace isolation. This flag is required to avoid the reference of secrets or
 		configmaps located in a different namespace than the specified in the flag --watch-namespace.`)
 
-		_ = flags.Bool("disable-node-list", false,
-			`Disable querying nodes. If --force-namespace-isolation is true, this should also be set. (DEPRECATED)`)
-
 		updateStatusOnShutdown = flags.Bool("update-status-on-shutdown", true, `Indicates if the
 		ingress controller should update the Ingress status IP/hostname when the controller
 		is being stopped. Default is true`)
@@ -97,8 +95,7 @@ func parseFlags() (bool, *controller.Configuration, error) {
 		If the certificate contain issues chain issues is not possible to enable OCSP.
 		Default is true.`)
 
-		syncRateLimit = flags.Float32("sync-rate-limit", 0.3,
-			`Define the sync frequency upper limit`)
+		syncRateLimit = flags.Float32("sync-rate-limit", 0.3, `Define the sync frequency upper limit`)
 
 		kongURL = flags.String("kong-url", "", "The address of the Kong Admin URL "+
 			"to connect to in the format of protocol://address:port, e.g., "+
@@ -122,11 +119,9 @@ func parseFlags() (bool, *controller.Configuration, error) {
 		return true, nil, nil
 	}
 
-	/*
-		if *defaultSvc == "" {
-			return false, nil, fmt.Errorf("Please specify --default-backend-service")
-		}
-	*/
+	if *defaultSvc == "" {
+		return false, nil, fmt.Errorf("Please specify --default-backend-service")
+	}
 
 	if *ingressClass != "" {
 		glog.Infof("Watching for ingress class: %s", *ingressClass)
