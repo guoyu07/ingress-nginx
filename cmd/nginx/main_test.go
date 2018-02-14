@@ -63,7 +63,7 @@ func TestHandleSigterm(t *testing.T) {
 
 	oldArgs := os.Args
 	defer func() { os.Args = oldArgs }()
-	os.Args = []string{"cmd", "--default-backend-service", "ingress-nginx/default-backend-http", "--http-port", "0", "--https-port", "0"}
+	os.Args = []string{"cmd", "--default-backend-service", "ingress-nginx/default-backend-http"}
 
 	_, conf, err := parseFlags()
 	if err != nil {

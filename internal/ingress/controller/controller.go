@@ -150,15 +150,12 @@ func (n *NGINXController) getDefaultUpstream() *ingress.Backend {
 	svcKey := n.cfg.DefaultService
 	svc, err := n.store.GetService(svcKey)
 	if err != nil {
-		glog.Warningf("unexpected error searching the default backend %v: %v", n.cfg.DefaultService, err)
-		upstream.Endpoints = append(upstream.Endpoints, n.DefaultEndpoint())
 		return upstream
 	}
 
 	endps := n.getEndpoints(svc, &svc.Spec.Ports[0], apiv1.ProtocolTCP, &healthcheck.Config{})
 	if len(endps) == 0 {
 		glog.Warningf("service %v does not have any active endpoints", svcKey)
-		endps = []ingress.Endpoint{n.DefaultEndpoint()}
 	}
 
 	upstream.Service = svc

@@ -26,56 +26,58 @@ func (r *AdminResponse) String() string {
 	return fmt.Sprintf("[%d] %s", r.StatusCode, r.err)
 }
 
-type SNI struct {
+// Required defines the required fields to work between Kubernetes
+// and Kong and also defines common field present in Kong entities
+type Required struct {
 	metav1.TypeMeta   `json:"-"`
 	metav1.ObjectMeta `json:"-"`
 
 	ID string `json:"id,omitempty"`
 
-	Name        string `json:"name"`
-	Certificate string `json:"ssl_certificate_id"`
+	Tags []string `json:"tags,omitempty"`
 
 	CreatedAt int `json:"created_at,omitempty"`
 	UpdatedAt int `json:"updated_at,omitempty"`
 }
 
-type SNIList struct {
+type RequiredList struct {
 	metav1.TypeMeta `json:"-"`
 	metav1.ListMeta `json:"-"`
 
-	Items    []SNI  `json:"data"`
 	NextPage string `json:"next"`
 	Offset   string `json:"offset"`
 }
 
-type Certificate struct {
-	metav1.TypeMeta   `json:"-"`
-	metav1.ObjectMeta `json:"-"`
+type SNI struct {
+	Required `json:",inline"`
 
-	ID string `json:"id,omitempty"`
+	Name        string `json:"name"`
+	Certificate string `json:"ssl_certificate_id"`
+}
+
+type SNIList struct {
+	RequiredList `json:",inline"`
+
+	Items []SNI `json:"data"`
+}
+
+type Certificate struct {
+	Required `json:",inline"`
 
 	Cert  string   `json:"cert"`
 	Key   string   `json:"key"`
 	Hosts []string `json:"snis"`
-
-	CreatedAt int `json:"created_at,omitempty"`
-	UpdatedAt int `json:"updated_at,omitempty"`
 }
 
 type CertificateList struct {
-	metav1.TypeMeta `json:"-"`
-	metav1.ListMeta `json:"-"`
+	RequiredList `json:",inline"`
 
-	Items    []Certificate `json:"data"`
-	NextPage string        `json:"next"`
-	Offset   string        `json:"offset"`
+	Items []Certificate `json:"data"`
 }
 
 type Service struct {
-	metav1.TypeMeta   `json:"-"`
-	metav1.ObjectMeta `json:"-"`
+	Required `json:",inline"`
 
-	ID   string `json:"id,omitempty"`
 	Name string `json:"name"`
 
 	Protocol string `json:"protocol,omitempty"`
@@ -88,35 +90,24 @@ type Service struct {
 	ConnectTimeout int `json:"connect_timeout"`
 	ReadTimeout    int `json:"read_timeout"`
 	WriteTimeout   int `json:"write_timeout"`
-
-	CreatedAt int `json:"created_at,omitempty"`
-	UpdatedAt int `json:"updated_at,omitempty"`
 }
 
 type Upstream struct {
-	metav1.TypeMeta   `json:"-"`
-	metav1.ObjectMeta `json:"-"`
+	Required `json:",inline"`
 
-	ID   string `json:"id,omitempty"`
 	Name string `json:"name"`
 }
 
 type Target struct {
-	metav1.TypeMeta   `json:"-"`
-	metav1.ObjectMeta `json:"-"`
+	Required `json:",inline"`
 
-	ID        string `json:"id,omitempty"`
-	Target    string `json:"target"`
-	Weight    int    `json:"weight,omitempty"`
-	Upstream  string `json:"upstream_id"`
-	CreatedAt int    `json:"created_at,omitempty"`
+	Target   string `json:"target"`
+	Weight   int    `json:"weight,omitempty"`
+	Upstream string `json:"upstream_id"`
 }
 
 type Route struct {
-	metav1.TypeMeta   `json:"-"`
-	metav1.ObjectMeta `json:"-"`
-
-	ID string `json:"id,omitempty"`
+	Required `json:",inline"`
 
 	Protocols []string `json:"protocols"`
 	Hosts     []string `json:"hosts"`
@@ -127,9 +118,6 @@ type Route struct {
 	StripPath    bool `json:"strip_path"`
 
 	Service InlineService `json:"service"`
-
-	CreatedAt int `json:"created_at,omitempty"`
-	UpdatedAt int `json:"updated_at,omitempty"`
 }
 
 type InlineService struct {
@@ -137,30 +125,21 @@ type InlineService struct {
 }
 
 type RouteList struct {
-	metav1.TypeMeta `json:"-"`
-	metav1.ListMeta `json:"-"`
+	RequiredList `json:",inline"`
 
-	Items    []Route `json:"data"`
-	NextPage string  `json:"next"`
-	Offset   string  `json:"offset"`
+	Items []Route `json:"data"`
 }
 
 type UpstreamList struct {
-	metav1.TypeMeta `json:"-"`
-	metav1.ListMeta `json:"-"`
+	RequiredList `json:",inline"`
 
-	Items    []Upstream `json:"data"`
-	NextPage string     `json:"next"`
-	Offset   string     `json:"offset"`
+	Items []Upstream `json:"data"`
 }
 
 type TargetList struct {
-	metav1.TypeMeta `json:"-"`
-	metav1.ListMeta `json:"-"`
+	RequiredList `json:",inline"`
 
-	Items    []Target `json:"data"`
-	NextPage string   `json:"next"`
-	Offset   string   `json:"offset"`
+	Items []Target `json:"data"`
 }
 
 // Equal tests for equality between two Configuration types

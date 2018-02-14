@@ -43,7 +43,7 @@ func TestDefaults(t *testing.T) {
 
 	oldArgs := os.Args
 	defer func() { os.Args = oldArgs }()
-	os.Args = []string{"cmd", "--default-backend-service", "namespace/test", "--http-port", "0", "--https-port", "0"}
+	os.Args = []string{"cmd", "--default-backend-service", "namespace/test"}
 
 	showVersion, conf, err := parseFlags()
 	if err != nil {
