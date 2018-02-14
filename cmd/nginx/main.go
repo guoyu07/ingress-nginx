@@ -33,6 +33,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
+	discovery "k8s.io/apimachinery/pkg/version"
 	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -208,7 +210,26 @@ func createApiserverClient(apiserverHost string, kubeConfig string) (*kubernetes
 		return nil, err
 	}
 
-	v, err := client.Discovery().ServerVersion()
+	var v *discovery.Info
+
+	// In some environments is possible the client cannot connect the API server in the first request
+	// https://github.com/kubernetes/ingress-nginx/issues/1968
+	defaultRetry := wait.Backoff{
+		Steps:    5,
+		Duration: 10 * time.Millisecond,
+		Factor:   1.0,
+		Jitter:   0.1,
+	}
+	err = wait.ExponentialBackoff(defaultRetry, func() (bool, error) {
+		v, err = client.Discovery().ServerVersion()
+		switch {
+		case err == nil:
+			return true, nil
+		default:
+			return false, err
+		}
+	})
+
 	if err != nil {
 		return nil, err
 	}
